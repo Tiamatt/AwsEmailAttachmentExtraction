@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - TODO ... 
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create a Lambda function for email parsing, which is triggered by TODO
+    resourceLambdaForEmailParsing:
+        Type: AWS::Lambda::Function
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                -   id: W92
+                    reason: "Customer will enable reservedconcurrentlimit based on their use case"
+                -   id: W58
+                    reason: "Lambda functions has permissions to write cloudwatch logs"                
+        Properties:
+            FunctionName: !Sub '${paramTag}-lambda-for-email-parsing'
+            Handler: index.lambda_handler
+            Timeout: 900
+            MemorySize: 1024
+            Runtime: python3.9
+            Role: !GetAtt resourceIamRoleForEmailParsingLambda.Arn
+            Code:
+                # You can't specify a local file link (such as '/lambda-for-email-parsing.py') under "Code:" -> "ZipFile:"
+                # Instead, you must put in the function code itself. It is limited to 4096 bytes. 
+                # If your code is bigger, (or alternatively) you can to upload the code to S3 first and use S3Bucket and S3Key.
+                ZipFile: | #TODO - ADD
+            Environment:
+                Variables:
+                    EMAILS_DYNAMO_TABLE: !Ref resourceDynamoDbTableForParsedEmails
+                    ATTACHMENTS_BUCKET: !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                    EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC:  !Ref CREATE_A_NEW_TOPIC # TODO
+            VpcConfig: 
+                SecurityGroupIds:
+                    - !Ref resourceSecurityGroupForEmailParsingLambda
+                SubnetIds:  # TODO - CREATE VPC WITH SUBNETS
+                    - Fn::ImportValue:        
+                        !Sub ${ComputeEnvStack}-LambdaSubnetA
+                    - Fn::ImportValue: 
+                        !Sub ${ComputeEnvStack}-LambdaSubnetB
+            Tags:
+                    -   Key: project-name
+                        Value: !Ref paramTag
+        DependsOn:
+            - resourceIamRoleForEmailParsingLambda
+            - resourceDynamoDbTableForParsedEmails
+            # TODO add - CREATE_A_NEW_TOPIC
+            - resourceSecurityGroupForEmailParsingLambda
+            # 'exported-s3-bucket-for-attached-files-from-emails'
+            # TODO add add exported subnet IDs
+
+    # Create an IAM role for email parsing lambda function to allow it to access: 
+    # - DynamoDB table: resourceDynamoDbTableForParsedEmails)
+    # - KMS CMK: 'exported-kms-key-alias')
+    # - S3 bucket: 'exported-s3-bucket-for-attached-files-from-emails'
+    # - S3 bucket: 'exported-s3-bucket-for-raw-emails'
+    # - EC2 NetworkInterfaces
+    # - Logs
+    resourceIamRoleForEmailParsingLambda:
+        Type: AWS::IAM::Role
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                    -   id: W11
+                        reason: "No resource level permissions for ec2.DescribeNetworkInterfaces"
+        Properties:
+            RoleName: !Sub '${paramTag}-aim-role-for-email-parsing-lambda'
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowLambdaToAssumeRole
+                        Effect: Allow
+                        Principal:
+                            Service:
+                                - lambda.amazonaws.com
+                        Action:
+                            - sts:AssumeRole
+            Path: /
+            Policies:
+                -   PolicyName: !Sub '${paramTag}-aim-policy-for-email-parsing-lambda'
+                    PolicyDocument:
+                        Version: '2012-10-17'
+                        Statement:
+                            -   Sid: AllowToWriteInDynamoDb
+                                Effect: Allow
+                                Action:
+                                    -   dynamodb:PutItem
+                                Resource: 
+                                    -   !GetAtt resourceDynamoDbTableForParsedEmails.Arn
+                            -   Sid: AllowToKms
+                                Effect: Allow 
+                                Action:
+                                    -   kms:GenerateDataKey
+                                    -   kms:Decrypt
+                                Resource: 
+                                    -   !ImportValue 'exported-kms-key-alias'
+                            -   Sid: AllowToWriteAndReadFromS3
+                                Effect: Allow 
+                                Action:
+                                    -   s3:PutObject
+                                    -   s3:ListBucket
+                                    -   s3:GetObject
+                                Resource:
+                                    - !Join
+                                        - ''
+                                        - - 'arn:aws:s3:::'
+                                          - !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                                    - !Join
+                                        - ''
+                                        - - 'arn:aws:s3:::'
+                                          - !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                                          - /*                 
+                            -   Sid: AllowToS3
+                                Effect: Allow
+                                Action: 
+                                    - s3:GetObject
+                                Resource:
+                                    - !Join
+                                        - ''
+                                        - - 'arn:aws:s3:::'
+                                          - !ImportValue 'exported-s3-bucket-for-raw-emails'
+                                          - /*
+                            -   Sid: AllowToAccessEc2NetworkInterfaces # TODO - for EC2 security groups
+                                Effect: Allow 
+                                Action:
+                                    - ec2:DescribeNetworkInterfaces
+                                    - ec2:CreateNetworkInterface
+                                    - ec2:DeleteNetworkInterface
+                                    - ec2:DescribeInstances
+                                    - ec2:AttachNetworkInterface
+                                Resource: '*'
+                            -   Sid: AllowToCreateLogGroups
+                                Effect: AllowToCreateLogGroups
+                                Action: 
+                                    - logs:CreateLogGroup
+                                Resource: 
+                                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:* # todod - find out
+                            -   Sid: AllowToLog
+                                Effect: AllowToInsertLogs
+                                Action:
+                                    - logs:CreateLogStream
+                                    - logs:PutLogEvents
+                                Resource: 
+                                    - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${paramTag}-lambda-for-email-parsing'
+        DependsOn:
+            -   resourceDynamoDbTableForParsedEmails
+            #   'exported-kms-key-alias'
+            #   'exported-s3-bucket-for-attached-files-from-emails'
+            #   'exported-s3-bucket-for-raw-emails'
+
+    # Create a security group for email parsing lambda function to allow it access DynamoDB tables
+    resourceSecurityGroupForEmailParsingLambda:
+        Type: AWS::EC2::SecurityGroup
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                    -   id: W5
+                        reason: "Customer will enable VPC endpoints for S3 and DynamoDB and update the Egress accordingly"       
+        Properties:
+            GroupName: !Sub '${paramTag}-security-group-for-email-parsing-lambda'
+            GroupDescription: Security group for email parsing lambda
+            VpcId: !ImportValue CREATE_EXPORT_VPC # TODO
+            SecurityGroupEgress:
+                -   IpProtocol: tcp
+                    FromPort: 443
+                    ToPort: 443
+                    CidrIp: 0.0.0.0/0
+                    Description: "Lambda to call S3 DynamoDB Services"                      
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+        # DependsOn:
+        # CREATE_EXPORT_VPC TODO    
+    
+    # Create DynamoDB Table for parsed emails
+    resourceDynamoDbTableForParsedEmails:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            TableName: !Sub '${paramTag}-dynamodb-table-for-parsed-emails'
+            AttributeDefinitions:
+                -   AttributeName: email_id
+                    AttributeType: S
+                -   AttributeName: documentname # TODO - add separator
+                    AttributeType: S         
+            BillingMode: PAY_PER_REQUEST
+            SSESpecification:
+                KMSMasterKeyId: !ImportValue 'exported-kms-key-alias'
+                SSEEnabled: true
+                SSEType: KMS      
+            KeySchema:
+                -   AttributeName: email_id
+                    KeyType: HASH
+                -   AttributeName: documentname
+                    KeyType: RANGE        
+            PointInTimeRecoverySpecification:
+                PointInTimeRecoveryEnabled: true
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+        # DependsOn:
+        # NONE   
+
+    # Create TODO
+    resourcsPermissionForSnsTopicForIncomingEmailsToInvokeLambda:
+        Type: AWS::Lambda::Permission
+        Properties: 
+            FunctionName: !Ref resourceLambdaForEmailParsing # !GetAtt resourceLambdaForEmailParsing.Arn TODO - find out
+            Action: lambda:InvokeFunction
+            Principal: sns.amazonaws.com
+            # SourceAccount: !Ref AWS::AccountId TODO - find out do we need it?
+            SourceArn: !ImportedValue 'exported-sns-topic-arn-for-incoming-emails'
+
+    # Create
+    resourceSnsTopicSubscriptionForIncomingEmails:
+        Type: AWS::SNS::Subscription
+        Properties:
+            Endpoint: !Ref resourceLambdaForEmailParsing # !GetAtt resourceLambdaForEmailParsing.Arn TODO - find out
+            Protocol: lambda
+            TopicArn: !ImportValue 'exported-sns-topic-arn-for-incoming-emails'
+
+## =================== OUTPUTS =================== ##  
+Outputs:
+    outputLambdaForEmailParsing:
+        Description: ARN for email parsing lambda function
+        Value: !Ref resourceLambdaForEmailParsing
+        Export:
+            Name: 'exported-lambda-for-email-parsing'

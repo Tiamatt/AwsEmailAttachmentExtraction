@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - TODO ... 
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create an IAM role 
+    resourceIamRoleForEmailParsingLambda:
+        Type: 'AWS::IAM::Role'
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                - id: W11
+                    reason: "No resource level permissions for ec2.DescribeNetworkInterfaces"        
+        Properties:
+            RoleName: !Sub '${paramTag}-aim-role-for-email-parsing-lambda'
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowLambdaToAssumeRole
+                        Effect: Allow
+                        Principal:
+                            Service:
+                                - 'lambda.amazonaws.com'
+                        Action:
+                            - sts:AssumeRole
+            Path: /
+            Policies:
+                -   PolicyName: !Sub '${paramTag}-aim-policy-for-email-parsing-lambda'
+                    PolicyDocument:
+                        Version: '2012-10-17'
+                        Statement:
+                        -   Sid: AllowToDynamoDb
+                            Effect: Allow
+                            Action:
+                                -   dynamodb:PutItem
+                            Resource: !GetAtt # TODO
+                                - EmailsDynamoTable
+                                - Arn
+                        -   Sid: AllowToKms
+                            Effect: Allow 
+                            Action:
+                                -   'kms:GenerateDataKey'
+                                -   'kms:Decrypt'
+                            Resource: 
+                                -   !ImportValue 'exported-kms-key-alias'
+                        -   Sid: AllowToS3
+                            Effect: Allow 
+                            Action:
+                                -   's3:PutObject'
+                                -   's3:ListBucket'
+                                -   's3:GetObject'
+                            Resource:
+                                - !Join
+                                    - ''
+                                    - - 'arn:aws:s3:::'
+                                      - !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                                - !Join
+                                    - ''
+                                    - - 'arn:aws:s3:::'
+                                      - !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                                      - /*
+                        -   Sid: AllowToEC2 # TODO - fir EC2 security groups
+                            Effect: Allow 
+                            Action:
+                                - 'ec2:DescribeNetworkInterfaces'
+                                - 'ec2:CreateNetworkInterface'
+                                - 'ec2:DeleteNetworkInterface'
+                                - 'ec2:DescribeInstances'
+                                - 'ec2:AttachNetworkInterface'
+                            Resource: "*"                     
+                        -   Sid: AllowToS3
+                            Effect: Allow
+                            Action: 
+                                - 's3:GetObject'
+                        Resource:
+                            - !Join
+                                - ''
+                                - - 'arn:aws:s3:::'
+                                  - !ImportValue 'exported-s3-bucket-for-attached-files-from-emails'
+                                  - /*
+                        -   Sid: AllowTo
+                            Effect: AllowToCreateLogGroups
+                            Action: 
+                                - 'logs:CreateLogGroup'
+                            Resource: 
+                                - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:* # todod - find out
+                        -   Sid: AllowToLog
+                            Effect: Allow
+                            Action:
+                                - 'logs:CreateLogStream'
+                                - 'logs:PutLogEvents'
+                            Resource: 
+                                - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${paramTag}-lambda-for-email-parsing'
+  
+            
+            
+PermissionForIncomingEmailSNSTopicToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !GetAtt EmailParsing.Arn 
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId      
+      SourceArn:
+            Fn::ImportValue: 
+                !Sub ${IncomingEmailStack}-IncomingEmailSNSTopic         
+
+    resourceLambdaForEmailParsing:
+        Type: AWS::Lambda::Function
+        Metadata:
+            cfn_nag:
+                rules_to_suppress:
+                - id: W92
+                  reason: "Customer will enable reservedconcurrentlimit based on their use case"
+                - id: W58
+                  reason: "Lambda functions has permissions to write cloudwatch logs"                
+        Properties:
+          FunctionName: textract-demo-functions-resourceLambdaForEmailParsing
+          Handler: index.lambda_handler
+          Timeout: 900
+          MemorySize: 1024
+          Runtime: python3.9
+          Role:
+            !GetAtt
+            - resourceIamRoleForEmailParsingLambda
+            - Arn
+          Code:
+            ZipFile: | #TODO - ADD
+
+          Environment:
+            Variables:
+              EMAILS_DYNAMO_TABLE:
+                Ref: EmailsDynamoTable
+              ATTACHMENTS_BUCKET:
+                Ref: AttachmentsS3Bucket
+              TEXTRACT_NOTIFICATION_TOPIC_ARN:
+                Ref: TextractCallbackSNSTopic
+              TEXTRACT_NOTIFICATION_ROLE_ARN:
+                !GetAtt
+                - TextractServiceRole
+                - Arn
+          VpcConfig:
+            SecurityGroupIds:
+            - Ref: EmailParsingSecurityGroup
+            SubnetIds:
+            - Fn::ImportValue:        
+                !Sub ${ComputeEnvStack}-LambdaSubnetA
+            - Fn::ImportValue: 
+                !Sub ${ComputeEnvStack}-LambdaSubnetB
+
+    DependsOn:
+    - EmailsDynamoTable
+
+  EmailParsingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+        cfn_nag:
+            rules_to_suppress:
+            - id: W5
+              reason: "Customer will enable VPC endpoints for S3 and DynamoDB and update the Egress accordingly"       
+    Properties:
+      #GroupName:
+      #  !Sub ${AWS::StackName}-email-parsing
+      GroupDescription: Textract callback Lambda security group
+      VpcId: 
+         Fn::ImportValue:        
+          !Sub ${ComputeEnvStack}-VPC
+      SecurityGroupEgress:
+                - IpProtocol: tcp
+                  FromPort: 443
+                  ToPort: 443
+                  CidrIp: 0.0.0.0/0
+                  Description: "Lambda to call S3 DynamoDB Services"                      
+      Tags:
+      - Key: Name
+        Value:
+          !Sub ${AWS::StackName}-email-parsing
+  IncomingEmailSNSTopicSubscription:
+        Type: AWS::SNS::Subscription
+        Properties:
+            Endpoint: !GetAtt resourceLambdaForEmailParsing.Arn
+            Protocol: lambda
+            TopicArn: 
+                Fn::ImportValue: 
+                    !Sub ${IncomingEmailStack}-IncomingEmailSNSTopic                   
+  EmailsDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: email_id
+        AttributeType: S
+      - AttributeName: documentname
+        AttributeType: S         
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        KMSMasterKeyId: 
+            Fn::ImportValue: KeyAliasName
+        SSEEnabled: true
+        SSEType: KMS      
+      KeySchema:
+      - AttributeName: email_id
+        KeyType: HASH
+      - AttributeName: documentname
+        KeyType: RANGE        
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      #TableName:
+      #  !Sub ${AWS::StackName}-emails-${AWS::AccountId}
+
+
+
+## =================== OUTPUTS =================== ##  
+Outputs:
+     resourceLambdaForEmailParsingFunction:
+    Value:
+      !GetAtt
+      - resourceLambdaForEmailParsing
+      - Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-resourceLambdaForEmailParsingFunction"      

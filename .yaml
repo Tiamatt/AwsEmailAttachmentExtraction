@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - Create an S3 bucket to store attached files from emails
+    - Create a policy for S3 bucket for attached files from emails to allow Lambda function to create/store and read them
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create an S3 bucket to store attached files from emails
+    resourceS3BucketForAttachedFilesFromEmails:
+        Type: 'AWS::S3::Bucket'
+        DeletionPolicy: Delete # allow CloudFormation delete the bucket when stack is deleted
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            BucketName: !Sub '${paramTag}-bucket-for-email-attachments'
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                        SSEAlgorithm: AES256
+            AccessControl: BucketOwnerFullControl
+            LoggingConfiguration:
+                DestinationBucketName: !ImportValue 'exported-s3-bucket-for-logs' 
+                LogFilePrefix: !Sub '/logs/email-attachments/${paramTag}'
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a policy for S3 bucket for attached files from emails to allow Lambda function to create/store and read them
+    resourceS3BucketPolicyForAttachedFilesFromEmails:
+        Type: 'AWS::S3::BucketPolicy' 
+        Properties:
+            Bucket: !Ref resourceS3BucketForAttachedFilesFromEmails
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowLambdaToWriteAndRead
+                        Effect: Allow
+                        Principal:
+                            Service: 
+                                - 'lambda.amazonaws.com'
+                        Action: 
+                            - 's3:PutObject'
+                            - 's3:GetObject'
+                            - 's3:ListBucket'           
+                        Resource:  !Join 
+                            - ''
+                            - - 'arn:aws:s3:::'
+                              - !Ref resourceS3BucketForAttachedFilesFromEmails
+                              - /* 
+        DependsOn:
+            - resourceS3BucketForAttachedFilesFromEmails
+
+     
+## =================== OUTPUTS =================== ##  
+Outputs:
+    outputS3BucketForAttachedFilesFromEmails:
+        Description: Name of S3 bucket for attached files from emails
+        Value: !Ref resourceS3BucketForAttachedFilesFromEmails
+        Export:
+            Name: 'exported-s3-bucket-for-attached-files-from-emails'

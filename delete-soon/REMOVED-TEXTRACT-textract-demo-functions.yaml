@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simple Textract and Lambda demo. Incoming email messages are received
+  by SES, persisted to S3 and any PDF, PNG or JPG attachments have their text content
+  extracted.'
+Resources: 
+  AttachmentsS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub textract-demo-attachments-${AWS::AccountId}
+      BucketEncryption:
+              ServerSideEncryptionConfiguration:
+               - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+      AccessControl: BucketOwnerFullControl
+      LoggingConfiguration:
+        DestinationBucketName: 
+                        Fn::ImportValue:
+                           !Sub ${IncomingEmailStack}-S3BucketLogs                     
+        LogFilePrefix: !Sub '/logs/textract-demo-attachments-${AWS::Region}-${AWS::AccountId}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+      Tags:
+        -
+          Key: Purpose
+          Value: Email Attachments       
+  AttachmentsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn:
+    - AttachmentsS3Bucket      
+    Properties:
+      Bucket: !Ref AttachmentsS3Bucket
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowWrite
+            Effect: Allow
+            Principal:
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: 
+            - s3:GetObject
+            - s3:ListBucket
+            - s3:PutObject             
+            Resource:
+            - !Sub arn:aws:s3:::textract-demo-attachments-${AWS::AccountId}
+            - !Sub arn:aws:s3:::textract-demo-attachments-${AWS::AccountId}/*  
+  EmailParsingRole:
+    Type: AWS::IAM::Role
+    Metadata:
+        cfn_nag:
+            rules_to_suppress:
+            - id: W11
+              reason: "No resource level permissions for ec2.DescribeNetworkInterfaces"        
+    Properties:
+      #RoleName:
+      #  !Sub ${AWS::StackName}-lambda-email-parsing
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: EmailParsingLambdaFunctionAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: dynamodb:PutItem
+            Resource:
+              !GetAtt
+              - EmailsDynamoTable
+              - Arn
+          - Effect: Allow
+            Action: textract:StartDocumentAnalysis
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - kms:generatedatakey
+            - kms:decrypt
+            Resource: 
+                Fn::ImportValue: KeyArn            
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:ListBucket
+            - s3:PutObject
+            Resource:
+            - !Sub arn:aws:s3:::textract-demo-attachments-${AWS::AccountId}
+            - !Sub arn:aws:s3:::textract-demo-attachments-${AWS::AccountId}/* 
+          - Effect: Allow
+            Action:
+            - ec2:DescribeNetworkInterfaces
+            - ec2:CreateNetworkInterface
+            - ec2:DeleteNetworkInterface
+            - ec2:DescribeInstances
+            - ec2:AttachNetworkInterface          
+            Resource: "*"                     
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource:
+              !Sub
+              - ${arn}/*
+              - arn:
+                  Fn::ImportValue: 
+                    !Sub ${IncomingEmailStack}-RawEmailsS3BucketARN
+          - Effect: Allow
+            Action: logs:CreateLogGroup
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/textract-demo-functions-EmailParsing:*                   
+  PermissionForIncomingEmailSNSTopicToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !GetAtt EmailParsing.Arn 
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId      
+      SourceArn:
+            Fn::ImportValue: 
+                !Sub ${IncomingEmailStack}-IncomingEmailSNSTopic         
+  EmailParsing:
+    DependsOn:
+    - EmailsDynamoTable
+    Type: AWS::Lambda::Function
+    Metadata:
+        cfn_nag:
+            rules_to_suppress:
+            - id: W92
+              reason: "Customer will enable reservedconcurrentlimit based on their use case"
+            - id: W58
+              reason: "Lambda functions has permissions to write cloudwatch logs"                
+    Properties:
+      FunctionName: textract-demo-functions-EmailParsing
+      Handler: index.lambda_handler
+      Timeout: 900
+      MemorySize: 1024
+      Runtime: python3.9
+      Role:
+        !GetAtt
+        - EmailParsingRole
+        - Arn
+      Code:
+        ZipFile: |      
+          import email
+          import json
+          import os
+          from email import policy
+          import re
+          from datetime import datetime
+
+          import boto3
+
+          EMAILS_DYNAMO_TABLE = os.environ['EMAILS_DYNAMO_TABLE']
+          ATTACHMENTS_BUCKET = os.environ['ATTACHMENTS_BUCKET']
+          TEXTRACT_NOTIFICATION_TOPIC_ARN = \
+            os.environ['TEXTRACT_NOTIFICATION_TOPIC_ARN']
+          TEXTRACT_NOTIFICATION_ROLE_ARN = \
+            os.environ['TEXTRACT_NOTIFICATION_ROLE_ARN']
+
+
+          def lambda_handler(sns_payload, context):
+            s3 = boto3.client('s3')
+            textract = boto3.client('textract')
+            dynamodb = boto3.client('dynamodb')
+
+            if 'Records' not in sns_payload:
+              raise Exception('No Records section')
+
+            if len(sns_payload['Records']) != 1:
+              raise Exception('Expected only 1 record')
+
+            sns_message = sns_payload['Records'][0]['Sns']['Message']
+            event = json.loads(sns_message)
+
+            if 'action' not in event['receipt']:
+              raise Exception('Invalid event, expected action section')
+
+            sourceemail = event['mail']['source']
+
+            if '=' in sourceemail:
+              sourceemail = sourceemail.split('=')
+              sourceemail = sourceemail[2]
+            documentnamelist = ''
+            action = event['receipt']['action']
+
+            actionType = action['type']
+            if actionType != 'S3':
+              raise Exception('Expected action type to be S3, got: '
+                      + actionType)
+
+            bucket_name = action['bucketName']
+            object_key = action['objectKey']
+            email_id = object_key
+
+            s3_raw_email = s3.get_object(Bucket=bucket_name, Key=object_key)
+
+            raw_email_str = s3_raw_email['Body'].read().decode('utf-8')
+            raw_email = \
+              email.parser.Parser(policy=policy.strict).parsestr(raw_email_str)
+
+            source = 'Email from  ' + sourceemail
+            now = datetime.now()
+            dt_string = now.strftime('%d/%m/%Y %H:%M:%S')
+            attachment_index = 0
+            attachments = []
+            for part in raw_email.walk():
+              if part.is_attachment():
+                if len(part.get_filename()):
+                  attachment_key = object_key + '/attachments/' \
+                    + re.sub(r'[^a-zA-Z0-9]', '', part.get_filename())
+                  job_tag = email_id[0:5] + '_' + re.sub(r'[^a-zA-Z0-9]',
+                      '', part.get_filename())
+                  attachment_index += 1
+                else:
+                  attachment_id = str(attachment_index)
+                  attachment_key = object_key + '/attachments/' \
+                    + attachment_id
+                  job_tag = email_id[0:5] + '_' + attachment_id
+                  attachment_index += 1
+
+                s3.put_object(Bucket=ATTACHMENTS_BUCKET,
+                        Key=attachment_key, Body=part.get_content())
+                documentnamelist += part.get_filename() + ','
+
+                response = \
+                  textract.start_document_analysis(DocumentLocation={'S3Object': {'Bucket': ATTACHMENTS_BUCKET,
+                    'Name': attachment_key}}, FeatureTypes=['FORMS',
+                    'TABLES'], JobTag=job_tag,
+                    NotificationChannel={'SNSTopicArn': TEXTRACT_NOTIFICATION_TOPIC_ARN,
+                    'RoleArn': TEXTRACT_NOTIFICATION_ROLE_ARN})
+
+                attachments.append({
+                  'attachment_id': part.get_filename(),
+                  'content_type': part.get_content_type(),
+                  'key': attachment_key,
+                  'textract_job_id': response['JobId'],
+                  })
+                item = {
+                  'email_id': {'S': email_id},
+                  'subject': {'S': raw_email['subject']},
+                  'source': {'S': source},
+                  'documentname': {'S': documentnamelist[0:-1]},
+                  'timestamp': {'S': dt_string},
+                  }
+                dynamodb.put_item(TableName=EMAILS_DYNAMO_TABLE, Item=item,
+                          ReturnValues='NONE')
+            response = {'email_id': email_id, 'attachments': attachments}
+            return response
+
+      Environment:
+        Variables:
+          EMAILS_DYNAMO_TABLE:
+            Ref: EmailsDynamoTable
+          ATTACHMENTS_BUCKET:
+            Ref: AttachmentsS3Bucket
+          TEXTRACT_NOTIFICATION_TOPIC_ARN:
+            Ref: TextractCallbackSNSTopic
+          TEXTRACT_NOTIFICATION_ROLE_ARN:
+            !GetAtt
+            - TextractServiceRole
+            - Arn
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: EmailParsingSecurityGroup
+        SubnetIds:
+        - Fn::ImportValue:        
+            !Sub ${ComputeEnvStack}-LambdaSubnetA
+        - Fn::ImportValue: 
+            !Sub ${ComputeEnvStack}-LambdaSubnetB
+  EmailParsingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+        cfn_nag:
+            rules_to_suppress:
+            - id: W5
+              reason: "Customer will enable VPC endpoints for S3 and DynamoDB and update the Egress accordingly"       
+    Properties:
+      #GroupName:
+      #  !Sub ${AWS::StackName}-email-parsing
+      GroupDescription: Textract callback Lambda security group
+      VpcId: 
+         Fn::ImportValue:        
+          !Sub ${ComputeEnvStack}-VPC
+      SecurityGroupEgress:
+                - IpProtocol: tcp
+                  FromPort: 443
+                  ToPort: 443
+                  CidrIp: 0.0.0.0/0
+                  Description: "Lambda to call S3 DynamoDB Services"                      
+      Tags:
+      - Key: Name
+        Value:
+          !Sub ${AWS::StackName}-email-parsing
+  IncomingEmailSNSTopicSubscription:
+        Type: AWS::SNS::Subscription
+        Properties:
+            Endpoint: !GetAtt EmailParsing.Arn
+            Protocol: lambda
+            TopicArn: 
+                Fn::ImportValue: 
+                    !Sub ${IncomingEmailStack}-IncomingEmailSNSTopic                   
+  EmailsDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: email_id
+        AttributeType: S
+      - AttributeName: documentname
+        AttributeType: S         
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        KMSMasterKeyId: 
+            Fn::ImportValue: KeyAliasName
+        SSEEnabled: true
+        SSEType: KMS      
+      KeySchema:
+      - AttributeName: email_id
+        KeyType: HASH
+      - AttributeName: documentname
+        KeyType: RANGE        
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      #TableName:
+      #  !Sub ${AWS::StackName}-emails-${AWS::AccountId}
+
+
+Parameters:
+  IncomingEmailStack:
+    Type: String
+    Description: Name of the parent stack for incoming emails
+  ComputeEnvStack:
+    Type: String
+    Description: Name of the parent stack for the compute environment
+Outputs:
+  EmailParsingFunction:
+    Value:
+      !GetAtt
+      - EmailParsing
+      - Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EmailParsingFunction"      

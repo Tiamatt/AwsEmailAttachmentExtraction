@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - Create an SNS topic for incoming emails
+    - Create a policy for SNS topic for incoming emails to allow SES to perform several actions (like publish messages, get attributes, set attributes, etc.) on SNS topic. Allow SES to trigger SNS topic for email's further processing
+    - Create an empty SES receipt rule set to allow SES authenticate each received email 
+    - Create an SES receipt rule to process incoming emails by storing them in an S3 bucket for incoming emails and sending notifications to an SNS topic for incoming email
+    - Create an SES Identity by specifing a domain name that will be used to send emails to SES. Note, before you can use an SES identity, you first have to verify it (check email that domain name is attached to).
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramDomainName:
+        Description: Specifies a domain name (with already configured MX record) as an SES identity that will be used to send emails to SES. Note, before you can use an SES identity, you first have to verify it (check email that domain name is attached to)
+        Type: String
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+    paramEmailAddress:
+        Description: Specify an email address for Amazon SES email to receive and extract attached files. Should use the same domain name as specified in paramDomainName
+        Type: String
+        AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        ConstraintDescription: Must be an email address
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create an SNS topic for incoming emails
+    resourceSnsTopicForIncomingEmails:
+        Type: 'AWS::SNS::Topic'
+        Properties:
+            DisplayName: !Sub '${paramTag}-sns-topic-for-incoming-emails'
+            TopicName: !Sub '${paramTag}-sns-topic-for-incoming-emails'
+            # SNS topic must use an AWS KMS customer managed key instead of the default key (AWS/SNS)
+            # This is because the default key policy doesn't include the required permissions for the AWS service to perform AWS KMS operations
+            KmsMasterKeyId: !ImportValue 'exported-kms-key-alias'
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a policy for SNS topic for incoming emails to allow SES to perform several actions (like publish messages, get attributes, set attributes, etc.) on SNS topic 
+    # Allow SES to trigger SNS topic for email's further processing
+    resourceSnsTopicPolicyForIncomingEmails:
+        Type: 'AWS::SNS::TopicPolicy'
+        Properties:
+            Topics:
+                - !Ref resourceSnsTopicForIncomingEmails
+            PolicyDocument:
+                Id: SnsTopicPolicyForIncomingEmails
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: SesTriggerAccess
+                        Effect: Allow
+                        Principal:
+                            Service:
+                            - 'ses.amazonaws.com'
+                        Action:
+                            - 'SNS:Publish'
+                            - 'SNS:GetTopicAttributes' 
+                            - 'SNS:SetTopicAttributes'
+                            - 'SNS:AddPermission' 
+                            - 'SNS:RemovePermission'
+                            - 'SNS:DeleteTopic' 
+                            - 'SNS:Subscribe'
+                            - 'SNS:ListSubscriptionsByTopic'   
+                        Resource:
+                            - !Ref resourceSnsTopicForIncomingEmails
+
+    # Create an empty SES receipt rule set to allow SES authenticate each received email 
+    # Note, there is a know issue that CloudFormation does not support setting an active receipt rule set yet
+    # Which means, there is no "Enabled: true" option on ReceiptRuleSet level
+    # IMPORTANT!!! you currently have to go to console to activate it MANUALLY
+    resourceSesReceiptRuleSet:
+        Type: 'AWS::SES::ReceiptRuleSet'
+        Properties:
+            RuleSetName: !Sub '${paramTag}-ses-receipt-rule-set-for-incoming-emails'
+
+    # Create an SES receipt rule to process incoming emails by storing them in an S3 bucket for incoming emails and sending notifications to an SNS topic for incoming email
+    resourceSesReceiptRule:
+        Type: 'AWS::SES::ReceiptRule'
+        Properties:
+            RuleSetName: !Ref resourceSesReceiptRuleSet
+            Rule:
+                Name: !Sub '${paramTag}-ses-receipt-rule-for-emails'
+                Enabled: true
+                ScanEnabled: true # allow SES to scan incoming emails
+                Actions:
+                    - S3Action:
+                        BucketName: !ImportValue 'exported-s3-bucket-for-raw-emails'
+                        ObjectKeyPrefix: ''
+                        TopicArn: !Ref resourceSnsTopicForIncomingEmails
+
+                Recipients:
+                    -   !Ref paramEmailAddress
+        DependsOn:
+            - resourceSesReceiptRuleSet
+
+    # Create an SES Identity by by specifing a domain name that will be used to send emails to SES
+    # Note, before you can use an SES identity, you first have to verify it (check email that domain name is attached to).
+    # Once created and verified, avoid further development and re-creation
+    # resourceSesEmailIdentity:
+    #     Type: AWS::SES::EmailIdentity
+    #     Properties: 
+    #         EmailIdentity: !Ref paramDomainName
+
+## =================== OUTPUTS =================== ##  
+Outputs:
+    outputSnsTopicForIncomingEmailsArn:
+        Description: ARN of SNS topic for the incoming emails
+        Value: !Ref resourceSnsTopicForIncomingEmails # avoid using !GetAtt to get ARN, it's already an ARN
+        Export:
+            Name: 'exported-sns-topic-arn-for-incoming-emails'

@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - Create a custom VPC with a pair of public and private subnets spread across two AZs
+    - TODO ... 
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramVpcCIDR:
+        Description: Specify the IP range (CIDR notation) for VPC
+        Type: String
+        Default: 10.192.0.0/16
+    paramPublicSubnet1CIDR:
+        Description: Specify the IP range (CIDR notation)  for the public subnet in AZ A
+        Type: String
+        Default: 10.192.10.0/24
+    paramPublicSubnet2CIDR:
+        Description: Specify the IP range (CIDR notation)  for the public subnet in AZ B
+        Type: String
+        Default: 10.192.11.0/24
+    paramPrivateSubnet1CIDR:
+        Description: Specify the IP range (CIDR notation)  for the private subnet in AZ A
+        Type: String
+        Default: 10.192.20.0/24
+    paramPrivateSubnet2CIDR:
+        Description: Specify the IP range (CIDR notation)  for the private subnet in AZ B
+        Type: String
+        Default: 10.192.21.0/24
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # ----------------  Step 1 ----------------
+    # TODO - Create an VPC
+    myVPC:
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: !Ref paramVpcCIDR
+            EnableDnsSupport: true # let instances in the VPC get DNS hostnames
+            EnableDnsHostnames: true # allow DNS resolution
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # TODO - Create a Internet Gateway
+    myInternetGateway:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # TODO - Attach the Internet Gateway to the VPC
+    myVPCGatewayAttachment:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            VpcId: !Ref myVPC
+            InternetGatewayId: !Ref myInternetGateway
+
+    # ----------------  Step 2 ----------------
+    # Create a public route table for the VPC (will be public once it is associated with the Internet Gateway)
+    myPublicRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref myVPC
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Associate the public route table with the Internet Gateway
+    myPublicRoute:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref myPublicRouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            GatewayId: !Ref myInternetGateway
+        DependsOn: myVPCGatewayAttachment
+
+    # Create a public subnet in AZ 1 (will be public once it is associated with public route table)
+    myPublicSubnet1:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref myVPC
+            AvailabilityZone: !Select [ 0, !GetAZs '' ] # AZ 1
+            CidrBlock: !Ref paramPublicSubnet1CIDR
+            MapPublicIpOnLaunch: true # allow instances launched in this subnet receive a public IPv4 address
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a public subnet in AZ 2 (will be public once it is associated with public route table)
+    myPublicSubnet2:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref myVPC
+            AvailabilityZone: !Select [ 1, !GetAZs  '' ] # AZ 2
+            CidrBlock: !Ref paramPublicSubnet2CIDR
+            MapPublicIpOnLaunch: true # allow instances launched in this subnet receive a public IPv4 address
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Associate the public route table with the public subnet in AZ 1
+    myPublicSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref myPublicRouteTable
+            SubnetId: !Ref myPublicSubnet1
+  
+    # Associate the public route table with the public subnet in AZ 2
+    myPublicSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref myPublicRouteTable
+            SubnetId: !Ref myPublicSubnet2
+
+    
+    # ----------------  Step 3 ----------------
+    # Specify an Elastic IP (EIP) address for a NAT Gateway in AZ 1
+    myEIPforNatGateway1:
+        Type: AWS::EC2::EIP
+        Properties:
+            Domain: vpc # if the region supports EC2-Classic, the default is "standard", otherwise - "vpc"
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+        DependsOn: myVPCGatewayAttachment
+
+    # Specify an Elastic IP (EIP) address for a NAT Gateway in AZ 2
+    myEIPforNatGateway2:
+        Type: AWS::EC2::EIP
+        DependsOn: myVPCGatewayAttachment
+        Properties:
+            Domain: vpc # if the region supports EC2-Classic, the default is "standard", otherwise - "vpc"
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a NAT Gateway in the public subnet for AZ 1
+    myNatGateway1:
+        Type: AWS::EC2::NatGateway
+        Properties:
+            AllocationId: !GetAtt myEIPforNatGateway1.AllocationId
+            SubnetId: !Ref myPublicSubnet1
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a NAT Gateway in the public subnet for AZ 2
+    myNatGateway2:
+        Type: AWS::EC2::NatGateway
+        Properties:
+            AllocationId: !GetAtt myEIPforNatGateway2.AllocationId
+            SubnetId: !Ref myPublicSubnet2
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a private route table for AZ 1
+    myPrivateRouteTable1:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref myVPC
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a private route table for AZ 2
+    myPrivateRouteTable2:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref myVPC
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+  # d) Associate the private route table with the Nat Gateway in AZ 1
+    myPrivateRouteForAz1:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref myPrivateRouteTable1
+            DestinationCidrBlock: 0.0.0.0/0
+            NatGatewayId: !Ref myNatGateway1 
+        DependsOn: 
+            - myPrivateRouteTable1
+            - myNatGateway1
+
+    #  Associate the private route table with the Nat Gateway in AZ 2
+    myPrivateRouteForAz2:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref myPrivateRouteTable2
+            DestinationCidrBlock: 0.0.0.0/0
+            NatGatewayId: !Ref myNatGateway2
+        DependsOn: 
+            - myPrivateRouteTable2
+            - myNatGateway2
+
+  # Create a private subnet in AZ 1
+    myPrivateSubnet1:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref myVPC
+            AvailabilityZone: !Select [ 0, !GetAZs '' ] # AZ 1
+            CidrBlock: !Ref paramPrivateSubnet1CIDR
+            MapPublicIpOnLaunch: false # private subnet doesn't need public IP
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a private subnet in AZ 2
+    myPrivateSubnet2:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref myVPC
+            AvailabilityZone: !Select [ 1, !GetAZs  '' ] # AZ 2
+            CidrBlock: !Ref paramPrivateSubnet2CIDR
+            MapPublicIpOnLaunch: false # private subnet doesn't need public IP
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Associate the private route table with the private subnet in AZ 1
+    myPrivateSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref myPrivateRouteTable1
+            SubnetId: !Ref myPrivateSubnet1
+  
+    #  Associate the private route table with the private subnet in AZ 2
+    myPrivateSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref myPrivateRouteTable2
+            SubnetId: !Ref myPrivateSubnet2
+
+## =================== OUTPUTS =================== #
+Outputs:
+    outputVPC:
+        Description: A reference to the created VPC
+        Value: !Ref myVPC
+    outputPublicSubnets:
+        Description: A list of the public subnets
+        Value: !Join [ ",", [ !Ref myPublicSubnet1, !Ref myPublicSubnet2 ]]
+    outputPrivateSubnets:
+        Description: A list of the private subnets
+        Value: !Join [ ",", [ !Ref myPrivateSubnet1, !Ref myPrivateSubnet2 ]]

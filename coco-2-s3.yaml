@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - Create an S3 bucket to store all project logs here
+    - Create a policy for S3 bucket for logs to allow other S3 buckets to create and store logs
+    - Create an S3 bucket to store raw emails (the whole content including attached files)
+    - Create a policy for S3 bucket for raw emails to allow SES to create/store raw emails content
+    - Create an S3 bucket to store attached files from emails
+    - Create a policy for S3 bucket for attached files from emails to allow Lambda function to create/store and read them
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+# Conditions:
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create an S3 bucket to store all project logs here
+    resourceS3BucketForLogs:
+        Type: 'AWS::S3::Bucket'
+        Metadata:
+            cfn_nag:
+                # suppress the W35 warning, allowing the stack to pass validation without needing the S3 bucket logging configuration in place
+                # the warning occurs when a customer S3 bucket is not configured for logging
+                # note, it's save, used from official AWS docs
+                rules_to_suppress:
+                - id: W35
+                  reason: 'This Bucket is for access logging from other buckets.'
+        DeletionPolicy: Delete # allow CloudFormation delete the bucket when stack is deleted
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            BucketName: !Sub '${paramTag}-bucket-for-logs'
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                        SSEAlgorithm: AES256     
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+    
+    # Create a policy for S3 bucket for logs to allow other S3 buckets to create and store logs
+    resourceS3BucketPolicyForLogs:
+        Type: 'AWS::S3::BucketPolicy'
+        Properties:
+            Bucket: !Ref resourceS3BucketForLogs
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Sid: AllowS3ToWrite
+                      Effect: Allow
+                      Principal:
+                        Service: 
+                            - 's3.amazonaws.com'
+                      Action: 
+                            - 's3:PutObject*' # TODO - check do we need asterix
+                      Resource:  !Join 
+                            - ''
+                            - - 'arn:aws:s3:::'
+                              - !Ref resourceS3BucketForLogs
+                              - /*
+        DependsOn:
+            - resourceS3BucketForLogs
+
+    # Create an S3 bucket to store raw emails (the whole content including attached files)
+    resourceS3BucketForRawEmails:
+        Type: 'AWS::S3::Bucket' 
+        DeletionPolicy: Delete # allow CloudFormation delete the bucket when stack is deleted  
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            BucketName: !Sub '${paramTag}-bucket-for-raw-emails'
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                        SSEAlgorithm: AES256
+            LoggingConfiguration:
+                DestinationBucketName: !Ref resourceS3BucketForLogs
+                LogFilePrefix: !Sub '/logs/raw-emails/${paramTag}'
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+        DependsOn:
+            -   resourceS3BucketForLogs
+
+    # Create a policy for S3 bucket for raw emails to allow SES to create/store raw emails content
+    resourceS3BucketPolicyForRawEmails:
+        Type: 'AWS::S3::BucketPolicy'
+        Properties:
+            Bucket: !Ref resourceS3BucketForRawEmails
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowSESPuts
+                        Effect: Allow
+                        Principal:
+                            Service: 
+                                - 'ses.amazonaws.com'
+                        Action:
+                            - 's3:PutObject'
+                        Resource:  !Join 
+                            - ''
+                            - - 'arn:aws:s3:::'
+                              - !Ref resourceS3BucketForRawEmails
+                              - /*
+        DependsOn:
+            - resourceS3BucketForRawEmails
+
+    # Create an S3 bucket to store attached files from emails
+    resourceS3BucketForAttachedFilesFromEmails:
+        Type: 'AWS::S3::Bucket'
+        DeletionPolicy: Delete # allow CloudFormation delete the bucket when stack is deleted
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            BucketName: !Sub '${paramTag}-bucket-for-email-attachments'
+            BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                        SSEAlgorithm: AES256
+            AccessControl: BucketOwnerFullControl
+            LoggingConfiguration:
+                DestinationBucketName: !Ref resourceS3BucketForLogs
+                LogFilePrefix: !Sub '/logs/email-attachments/${paramTag}'
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+
+    # Create a policy for S3 bucket for attached files from emails to allow Lambda function to create/store and read them
+    resourceS3BucketPolicyForAttachedFilesFromEmails:
+        Type: 'AWS::S3::BucketPolicy'
+        Properties:
+            Bucket: !Ref resourceS3BucketForAttachedFilesFromEmails
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowLambdaToWriteAndRead
+                        Effect: Allow
+                        Principal:
+                            Service: 
+                                - 'lambda.amazonaws.com'
+                        Action:
+                            -   's3:PutObject'
+                            -   's3:ListBucket'
+                            -   's3:GetObject'
+                        Resource:
+                            # Note, some actions are for individual resources (you need to use '/*') while other actions are apply to all resources in that service
+                            # That is why in this case it's important to specify both - a whole resource (without '/*') and all it's belongings (with '/*')
+                            - !Join
+                                - ''
+                                - - 'arn:aws:s3:::'
+                                  - !Ref resourceS3BucketForAttachedFilesFromEmails 
+                            - !Join
+                                - ''
+                                - - 'arn:aws:s3:::'
+                                  - !Ref resourceS3BucketForAttachedFilesFromEmails
+                                  - /*
+        DependsOn:
+            - resourceS3BucketForAttachedFilesFromEmails
+
+     
+## =================== OUTPUTS =================== ##  
+Outputs:
+    outputS3BucketForLogs:
+        Description: Name of S3 bucket for logs
+        Value: !Ref resourceS3BucketForLogs
+        Export:
+            Name: 'exported-s3-bucket-for-logs'
+    outputS3BucketForRawEmails:
+        Description: Name of S3 bucket for raw emails
+        Value: !Ref resourceS3BucketForRawEmails
+        Export:
+            Name: 'exported-s3-bucket-for-raw-emails'
+    outputS3BucketForAttachedFilesFromEmails:
+        Description: Name of S3 bucket for attached files from emails
+        Value: !Ref resourceS3BucketForAttachedFilesFromEmails
+        Export:
+            Name: 'exported-s3-bucket-for-attached-files-from-emails'

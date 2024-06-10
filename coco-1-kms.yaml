@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+## =================== DESCRIPTION =================== ##
+Description: >-
+    AWS CloudFormation sample template
+    - Create KMS customer managed key (CMK) for a specific or all AWS services
+        Set up a KMS key with conditional key rotation, parameter-driven key specifications, 
+        and a detailed key policy granting extensive permissions to the root account, 
+        specific permissions to the Admin role, and limited permissions to S3 and SES services.
+    - Create an alias for a KMS customer managed key (CMK) to use a friendly name rather than the key ID
+
+## =================== PARAMETERS =================== ##
+Parameters:
+    paramServiceForKmsKey:
+        Description: Select which AWS service is allowed to use this KMS customer managed key (CMK) (upper-case names define use-cases)
+        Type: String
+        AllowedValues:
+            - 'ALL_SERVICES'
+            - 'ROUTE53_DNSSEC'
+            - 'CLOUDTRAIL'
+            - connect
+            - dms
+            - ssm
+            - ec2
+            - elasticfilesystem
+            - es
+            - kinesis
+            - kinesisvideo
+            - lambda
+            - lex
+            - redshift
+            - rds
+            - secretsmanager
+            - ses
+            - s3
+            - importexport
+            - sqs
+            - workmail
+            - workspaces
+        Default: 'ALL_SERVICES'
+    paramKmsKeyType:
+        Description: Select the type of the KMS customer managed key (CMK)
+        Type: String
+        AllowedValues:
+            - SYMMETRIC_DEFAULT
+            - RSA_2048
+            - RSA_3072
+            - RSA_4096
+            - ECC_NIST_P256
+            - ECC_NIST_P384
+            - ECC_NIST_P521
+            - ECC_SECG_P256K1
+        Default: SYMMETRIC_DEFAULT
+    paramKmsKeyUsage:
+        Description: Select which cryptographic operations should the KMS customer managed key (CMK) support?
+        Type: String
+        AllowedValues:
+            - ENCRYPT_DECRYPT
+            - SIGN_VERIFY
+        Default: ENCRYPT_DECRYPT
+    paramTag:
+        Description: Specify a unique name for tag
+        Type: String
+        Default: coco-email-attachment
+        AllowedPattern: "[\\x20-\\x7E]*"
+        ConstraintDescription: Must contain only ASCII characters
+
+## ==================== MAPPINGS ==================== ##
+# Mappings:
+
+## ==================== CONDITIONS ==================== ##
+Conditions:
+    HasServiceAllServices: !Equals [!Ref paramServiceForKmsKey, 'ALL_SERVICES']
+    HasSymmetricKey: !Equals [!Ref paramKmsKeyType, 'SYMMETRIC_DEFAULT']
+
+## =================== RESOURCES =================== ##
+Resources:
+    # Create KMS customer managed key (CMK) for a specific or all AWS services
+    # Set up a KMS key with conditional key rotation, parameter-driven key specifications, 
+    # and a detailed key policy granting extensive permissions to the root account, 
+    # specific permissions to the Admin role, and limited permissions to S3 and SES services.
+    resourceKmsKey:
+        Type: 'AWS::KMS::Key'
+        DeletionPolicy: Delete # when the stack is deleted, the key is also deleted
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            EnableKeyRotation: !If [HasSymmetricKey, true, false]
+            KeySpec: !Ref paramKmsKeyType
+            KeyUsage: !Ref paramKmsKeyUsage
+            KeyPolicy:
+                Version: '2012-10-17'
+                Statement:
+                    -   Sid: AllowFullKmsAccessToRootAccount
+                        Effect: Allow
+                        Principal:
+                            AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+                        Action: 'kms:*'
+                        Resource: '*'
+                    # Make sure you have  ../role/Admin IAM role before uncommenting this part
+                    # -   Sid: AllowAdminRoleToManageKms
+                    #     Effect: Allow
+                    #     Principal:
+                    #         AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/Admin'
+                    #     Action:
+                    #         - 'kms:Create*'
+                    #         - 'kms:Describe*'
+                    #         - 'kms:Enable*'
+                    #         - 'kms:List*'
+                    #         - 'kms:Put*'
+                    #         - 'kms:Update*'
+                    #         - 'kms:Revoke*'
+                    #         - 'kms:Disable*'
+                    #         - 'kms:Get*'
+                    #         - 'kms:Delete*'
+                    #         - 'kms:ScheduleKeyDeletion'
+                    #         - 'kms:CancelKeyDeletion'
+                    #     Resource: '*'
+                    -   Sid: AllowS3AndSesToDecryptAndGenerateDataKey
+                        Effect: Allow
+                        Principal:
+                            Service: 
+                                - 's3.amazonaws.com'
+                                - 'ses.amazonaws.com'
+                        Action:
+                            -  'kms:Decrypt'
+                            -  'kms:GenerateDataKey'
+                        Resource: '*'
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+    # Create an alias for a KMS customer managed key (CMK) to use a friendly name rather than the key ID 
+    resourceKmsKeyAlias:
+        Type: 'AWS::KMS::Alias'
+        DeletionPolicy: Delete # when the stack is deleted, the key is also deleted
+        UpdateReplacePolicy: Retain # if the stack is updated and the alias needs to be replaced, the existing alias will be retained rather than deleted
+        Properties:
+            AliasName: !Sub 'alias/${paramTag}-key-alias' #  must begin with 'alias/'
+            TargetKeyId: !Ref resourceKmsKey
+
+## =================== OUTPUTS =================== ##  
+Outputs:
+    KmsKeyAlias:
+        Description: Alias of KMS customer managed key (CMK)
+        Value: !Ref resourceKmsKeyAlias
+        Export:
+            Name: 'exported-kms-key-alias'
+    KmsKeyArn:
+        Description: ARN of KMS customer managed key (CMK)
+        Value: !GetAtt resourceKmsKey.Arn
+        Export:
+            Name: 'exported-kms-key-arn'
