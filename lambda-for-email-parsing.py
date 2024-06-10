@@ -14,39 +14,41 @@
 
                     # Main function
                     def lambda_handler(event, context):
-                        print('START PROCESS')
+                        print("START PROCESS")
 
-                        # Get message from SNS topic 
-                        sns_message = get_sns_message(event)
-                        new_event = json.loads(sns_message)
-                        action = get_action(new_event)
-                        source_email = get_source_email(new_event)
-                        actionType = action['type']
-                        if actionType != 'S3':
-                            raise Exception('Expected action type to be S3, got: ' + actionType)
-                        bucket_name = action['bucketName']
-                        object_key = action['objectKey']
-                        email_id = object_key
+                        try:
+                            # Get message from SNS topic 
+                            sns_message = get_sns_message(event)
+                            new_event = json.loads(sns_message)
+                            action = get_action(new_event)
+                            source_email = get_source_email(new_event)
+                            actionType = action['type']
+                            if actionType != 'S3':
+                                raise Exception('Expected action type to be S3, got: ' + actionType)
+                            bucket_name = action['bucketName']
+                            object_key = action['objectKey']
+                            email_id = object_key
                         
-                        # process raw email
-                        raw_email_response = process_raw_email(bucket_name, object_key, source_email, email_id)
-                        print(f"Response: {raw_email_response}")
+                            # process raw email
+                            raw_email_response = process_raw_email(bucket_name, object_key, source_email, email_id)
+                            print(f"Response: {raw_email_response}")
 
-                        # publish a success message in SNS topic
-                        sns_response = publish_sns_message(raw_email_response)
-    
-                        print('END PROCESS')
-    
-                        return response
+                            # publish a success message in SNS topic
+                            sns_response = publish_sns_message(raw_email_response)
+
+                        except Exception as e:
+                            print(f"An unexpected error occurred: {e}")
+
+                        print("END PROCESS")
     
                     # Get notification message from SNS
                     def get_sns_message(sns_payload):
                         if 'Records' not in sns_payload:
-                            print('No Records section')
+                            print("No Records section")
                             raise Exception('No Records section')
     
                         if len(sns_payload['Records']) != 1:
-                            print('Expected only 1 record')
+                            print("Expected only 1 record")
                             raise Exception('Expected only 1 record')
     
                         sns_message = sns_payload['Records'][0]['Sns']['Message']
@@ -58,11 +60,11 @@
                     def get_action(new_event):
     
                         if 'receipt' not in new_event:
-                            print('Invalid event, expected receipt section')
+                            print("Invalid event, expected receipt section")
                             raise Exception('Invalid event, expected receipt section')
         
                         if 'action' not in new_event['receipt']:
-                            print('Invalid event, expected receipt action section')
+                            print("Invalid event, expected receipt action section")
                             raise Exception('Invalid event, expected receipt action section')
       
                         action = new_event['receipt']['action']
@@ -74,11 +76,11 @@
                     def get_source_email(new_event):
 
                         if 'mail' not in new_event:
-                            print('Invalid event, expected mail section')
+                            print("Invalid event, expected mail section")
                             raise Exception('Invalid event, expected mail section')
         
                         if 'source' not in new_event['mail']:
-                            print('Invalid event, expected email source section')
+                            print("Invalid event, expected email source section")
                             raise Exception('Invalid event, expected email source section')
 
                         source_email = new_event['mail']['source']
@@ -158,23 +160,27 @@
                     def publish_sns_message(raw_email_response):
                         sns = boto3.client('sns')
                         sns_message = {
-                                "subject": "EMAIL_PARSED_STATUS",
-                                "status": "SUCCESS",
-                                "details": raw_email_response
-                              }
+                                'subject': 'EMAIL_PARSED_STATUS',
+                                'status': 'SUCCESS',
+                                'details': raw_email_response
+                                }
                         try:
+                            # SNS messages are always strings - make the string a serialized version of custom object
+                            # also it is required to wrap the custom message in 'default' property 
                             response = sns.publish(
-                                  TopicArn=EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC,
-                                  Subject=sns_message["subject"],
-                                  Message=json.dumps(sns_message),
-                                  MessageStructure='json'
+                                    TopicArn=EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC,
+                                    Subject=sns_message['subject'],
+                                    Message=json.dumps({'default': json.dumps(sns_message)}),
+                                    MessageStructure='json'
                             )
-                            message_id = response["MessageId"]
-                            print('Successfully published message to SNS topic')
-                        except ClientError:
-                            print('Could not publish message to SNS topic')
-                            raise Exception('Could not publish message to SNS topic')
+                            message_id = response['MessageId']
+                            print("Successfully published message to SNS topic")
+                        except Exception as e:
+                            print("Failed to publish message to SNS topic")
+                            raise Exception(f'Failed to publish message to SNS topic. Error: {e}')
                         else:
                             return message_id
+
+                        # Keep this comment for CloudFormation sake - there is an issue that doesn't make sense
 
                     # --------- END CODE  --------- #

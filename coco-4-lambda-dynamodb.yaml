@@ -4,11 +4,14 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: >-
     AWS CloudFormation sample templatere
     - Create a Lambda function for email parsing, which is triggered by SNS notification for incoming emails
-        - The function will get raw email from S3 bucket; Parse the email content, get all attached documents; And store them in S3 bucket; Also it will save document details in DynamoDB table; And push a new notification with parsing status to SNS topic
     - Create a DynamoDB table to store parsed emails document details there
     - Create an IAM role for email parsing lambda function to allow it to access DynamoDB, S3 buckets, KMS
     - Create a permission for SNS topic for incoming emails to invoke lambda function for email parsing
     - Create an SNS topic subscription for SNS topic for incoming emails that triggers lambda function for email parsing
+    - Create an SNS topic for EMAIL_PARSED_STATUS (the message is published to SNS by Lambda function for email parsing)
+    - Create an SNS topic subscription for EMAIL_PARSED_STATUS to push messages to SQS queue for email attachment processing
+    - Create an SQS queue for email attachment processing so that SNS topic for EMAIL_PARSED_STATUS can send messages to the queue
+    - Create an SQS queue policy for email attachment processing to allow SNS to publish to the queue
 
 ## =================== PARAMETERS =================== ##
 Parameters:
@@ -56,7 +59,7 @@ Resources:
                 # Instead, you must put in the function code itself. It is limited to 4096 bytes. 
                 # If your code is bigger, (or alternatively) you can to upload the code to S3 first and use S3Bucket and S3Key.
                 # TODO - maybe try something like --zip-file fileb://function.zip
-                ZipFile: | 
+                ZipFile: |
                     # --------- START CODE  --------- #
                     import boto3
                     import email
@@ -73,39 +76,41 @@ Resources:
 
                     # Main function
                     def lambda_handler(event, context):
-                        print('START PROCESS')
+                        print("START PROCESS")
 
-                        # Get message from SNS topic 
-                        sns_message = get_sns_message(event)
-                        new_event = json.loads(sns_message)
-                        action = get_action(new_event)
-                        source_email = get_source_email(new_event)
-                        actionType = action['type']
-                        if actionType != 'S3':
-                            raise Exception('Expected action type to be S3, got: ' + actionType)
-                        bucket_name = action['bucketName']
-                        object_key = action['objectKey']
-                        email_id = object_key
+                        try:
+                            # Get message from SNS topic 
+                            sns_message = get_sns_message(event)
+                            new_event = json.loads(sns_message)
+                            action = get_action(new_event)
+                            source_email = get_source_email(new_event)
+                            actionType = action['type']
+                            if actionType != 'S3':
+                                raise Exception('Expected action type to be S3, got: ' + actionType)
+                            bucket_name = action['bucketName']
+                            object_key = action['objectKey']
+                            email_id = object_key
                         
-                        # process raw email
-                        raw_email_response = process_raw_email(bucket_name, object_key, source_email, email_id)
-                        print(f"Response: {raw_email_response}")
+                            # process raw email
+                            raw_email_response = process_raw_email(bucket_name, object_key, source_email, email_id)
+                            print(f"Response: {raw_email_response}")
 
-                        # publish a success message in SNS topic
-                        sns_response = publish_sns_message(raw_email_response)
-    
-                        print('END PROCESS')
-    
-                        return response
+                            # publish a success message in SNS topic
+                            sns_response = publish_sns_message(raw_email_response)
+
+                        except Exception as e:
+                            print(f"An unexpected error occurred: {e}")
+
+                        print("END PROCESS")
     
                     # Get notification message from SNS
                     def get_sns_message(sns_payload):
                         if 'Records' not in sns_payload:
-                            print('No Records section')
+                            print("No Records section")
                             raise Exception('No Records section')
     
                         if len(sns_payload['Records']) != 1:
-                            print('Expected only 1 record')
+                            print("Expected only 1 record")
                             raise Exception('Expected only 1 record')
     
                         sns_message = sns_payload['Records'][0]['Sns']['Message']
@@ -117,11 +122,11 @@ Resources:
                     def get_action(new_event):
     
                         if 'receipt' not in new_event:
-                            print('Invalid event, expected receipt section')
+                            print("Invalid event, expected receipt section")
                             raise Exception('Invalid event, expected receipt section')
         
                         if 'action' not in new_event['receipt']:
-                            print('Invalid event, expected receipt action section')
+                            print("Invalid event, expected receipt action section")
                             raise Exception('Invalid event, expected receipt action section')
       
                         action = new_event['receipt']['action']
@@ -133,11 +138,11 @@ Resources:
                     def get_source_email(new_event):
 
                         if 'mail' not in new_event:
-                            print('Invalid event, expected mail section')
+                            print("Invalid event, expected mail section")
                             raise Exception('Invalid event, expected mail section')
         
                         if 'source' not in new_event['mail']:
-                            print('Invalid event, expected email source section')
+                            print("Invalid event, expected email source section")
                             raise Exception('Invalid event, expected email source section')
 
                         source_email = new_event['mail']['source']
@@ -217,26 +222,31 @@ Resources:
                     def publish_sns_message(raw_email_response):
                         sns = boto3.client('sns')
                         sns_message = {
-                                "subject": "EMAIL_PARSED_STATUS",
-                                "status": "SUCCESS",
-                                "details": raw_email_response
-                              }
+                                'subject': 'EMAIL_PARSED_STATUS',
+                                'status': 'SUCCESS',
+                                'details': raw_email_response
+                                }
                         try:
+                            # SNS messages are always strings - make the string a serialized version of custom object
+                            # also it is required to wrap the custom message in 'default' property 
                             response = sns.publish(
-                                  TopicArn=EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC,
-                                  Subject=sns_message["subject"],
-                                  Message=json.dumps(sns_message),
-                                  MessageStructure='json'
+                                    TopicArn=EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC,
+                                    Subject=sns_message['subject'],
+                                    Message=json.dumps({'default': json.dumps(sns_message)}),
+                                    MessageStructure='json'
                             )
-                            message_id = response["MessageId"]
-                            print('Successfully published message to SNS topic')
-                        except ClientError:
-                            print('Could not publish message to SNS topic')
-                            raise Exception('Could not publish message to SNS topic')
+                            message_id = response['MessageId']
+                            print("Successfully published message to SNS topic")
+                        except Exception as e:
+                            print("Failed to publish message to SNS topic")
+                            raise Exception(f'Failed to publish message to SNS topic. Error: {e}')
                         else:
                             return message_id
 
+                        # Keep this comment for CloudFormation sake - there is an issue that doesn't make sense
+
                     # --------- END CODE  --------- #
+
             Environment:
                 Variables:
                     EMAILS_DYNAMO_TABLE: !Ref resourceDynamoDbTableForParsedEmails
@@ -248,8 +258,8 @@ Resources:
         DependsOn:
                 - resourceIamRoleForEmailParsingLambda
                 - resourceDynamoDbTableForParsedEmails
+                - resourceSnsTopicForEmailParsedStatus
                 # 'exported-s3-bucket-for-attached-files-from-emails'
-                # TODO add - EMAIL_PARSED_STATUS_NOTIFICATION_TOPIC
 
     # Create a DynamoDB table to store parsed emails document details there
     resourceDynamoDbTableForParsedEmails:
@@ -277,7 +287,7 @@ Resources:
                 -   Key: project-name
                     Value: !Ref paramTag
         # DependsOn:
-        # NONE
+            # NONE
 
     # Create an IAM role for email parsing lambda function to allow it to access: 
     # - DynamoDB table: resourceDynamoDbTableForParsedEmails
@@ -381,7 +391,7 @@ Resources:
     resourcsPermissionForSnsTopicForIncomingEmailsToInvokeLambda:
         Type: AWS::Lambda::Permission
         Properties: 
-            FunctionName: !Ref resourceLambdaForEmailParsing # !GetAtt resourceLambdaForEmailParsing.Arn TODO - find out
+            FunctionName: !Ref resourceLambdaForEmailParsing
             Action: lambda:InvokeFunction
             Principal: sns.amazonaws.com
             SourceArn: !ImportValue 'exported-sns-topic-arn-for-incoming-emails'
@@ -400,9 +410,9 @@ Resources:
         - resourceLambdaForEmailParsing
         # 'exported-sns-topic-arn-for-incoming-emails'
 
-    # Create an SNS topic for incoming emails EMAIL_PARSED_STATUS
+    # Create an SNS topic for EMAIL_PARSED_STATUS (the message is published to SNS by Lambda function for email parsing)
     resourceSnsTopicForEmailParsedStatus:
-        Type: 'AWS::SNS::Topic'
+        Type: AWS::SNS::Topic
         Properties:
             DisplayName: !Sub '${paramTag}-sns-topic-for-email-parsed-status'
             TopicName: !Sub '${paramTag}-sns-topic-for-email-parsed-status'
@@ -412,8 +422,57 @@ Resources:
             Tags:
                 -   Key: project-name
                     Value: !Ref paramTag
+        # DependsOn:
+            # 'exported-kms-key-alias'
 
+    # Create an SNS topic subscription for EMAIL_PARSED_STATUS to push messages to SQS queue for email attachment processing
+    resourceSnsTopicSubscriptionForEmailParsedStatus:
+        Type: AWS::SNS::Subscription
+        Properties:
+            TopicArn: !Ref resourceSnsTopicForEmailParsedStatus
+            Endpoint: !GetAtt resourceSqsQueueForEmailAttachmentProcessing.Arn
+            Protocol: sqs
+            RawMessageDelivery: 'true'
+        DependsOn:
+            - resourceSqsQueueForEmailAttachmentProcessing
+            - resourceSnsTopicForEmailParsedStatus
+            # 'exported-sns-topic-arn-for-incoming-emails'
 
+    # Create an SQS queue for email attachment processing so that SNS topic for EMAIL_PARSED_STATUS can send messages to the queue
+    resourceSqsQueueForEmailAttachmentProcessing:
+        Type: AWS::SQS::Queue
+        Properties:
+            QueueName: !Sub '${paramTag}-sqs-queue-for-email-attachment-processing'
+            Tags:
+                -   Key: project-name
+                    Value: !Ref paramTag
+        # DependsOn:
+            # NONE
+
+    # Create an SQS queue policy for email attachment processing to allow SNS to publish to the queue
+    resourceSqsQueuePolicyForEmailAttachmentProcessing:
+        Type: AWS::SQS::QueuePolicy
+        Properties:
+            Queues:
+                - !Ref resourceSqsQueueForEmailAttachmentProcessing
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -   Sid: AllowSnsToSendMessageToSqs
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            -   sns.amazonaws.com
+                    Action:
+                        -   sqs:SendMessage
+                    Resource: !GetAtt resourceSqsQueueForEmailAttachmentProcessing.Arn
+                    Condition:
+                        ArnEquals:
+                            aws:SourceArn: !Ref resourceSnsTopicForEmailParsedStatus
+        DependsOn:
+            - resourceSqsQueueForEmailAttachmentProcessing
+            - resourceSnsTopicForEmailParsedStatus
+                
 ## =================== OUTPUTS =================== ##  
 Outputs:
     outputLambdaForEmailParsing:
@@ -426,3 +485,8 @@ Outputs:
         Value: !GetAtt resourceLambdaForEmailParsing.Arn
         Export:
             Name: 'exported-lambda-arn-for-email-parsing'
+    outputSqsQueueArnForEmailAttachmentProcessing:
+        Description: Arn of SQS queue for email attachment processing
+        Value: !GetAtt resourceSqsQueueForEmailAttachmentProcessing.Arn
+        Export:
+            Name: 'exported-sqs-queue-for-email-attachment-processing'
